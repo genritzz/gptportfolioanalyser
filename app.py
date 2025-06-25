@@ -3,135 +3,138 @@ import yfinance as yf
 import pandas as pd
 import plotly.express as px
 import requests
-import time
+from datetime import datetime
 
-# === CONFIG ===
-ALPHA_VANTAGE_API_KEY = st.secrets["ALPHA_VANTAGE_API_KEY"] if "ALPHA_VANTAGE_API_KEY" in st.secrets else st.text_input("Enter Alpha Vantage API Key")
-SLEEP_BETWEEN_CALLS = 15
-
-# === FUNCTIONS ===
-def get_yahoo_data(ticker):
-    stock = yf.Ticker(ticker)
-    info = stock.info
-    return {
-        "price": info.get("regularMarketPrice"),
-        "sector": info.get("sector", "Unknown"),
-        "marketCap": info.get("marketCap"),
-        "peRatio": info.get("trailingPE")
-    }
-
-def classify_market_cap(cap):
-    if cap is None:
-        return "Unknown"
-    elif cap >= 10e9:
-        return "Large Cap"
-    elif cap >= 2e9:
-        return "Mid Cap"
-    else:
-        return "Small Cap"
-
-def get_sentiment_alpha(ticker, api_key):
-    url = f'https://www.alphavantage.co/query?function=NEWS_SENTIMENT&tickers={ticker}&apikey={api_key}'
-    try:
-        r = requests.get(url)
-        data = r.json()
-        sentiments = [a.get('overall_sentiment_score', 0) for a in data.get('feed', [])]
-        return sum(sentiments) / len(sentiments) if sentiments else None
-    except:
-        return None
-
-def recommend_action(sentiment, return_pct):
-    if sentiment is None:
-        return "No Data"
-    elif sentiment > 0.3 and return_pct > 0:
-        return "🚀 Increase Exposure"
-    elif sentiment < -0.3 and return_pct < 0:
-        return "🔻 Cut Exposure"
-    elif -0.2 < sentiment < 0.2:
-        return "⏸️ Hold"
-    else:
-        return "👀 Watch Closely"
-
-# === STREAMLIT UI ===
-st.title("📊 Portfolio Dashboard")
-st.markdown("Analyze your portfolio by sector, market cap, P/E, and sentiment.")
-
-with st.sidebar:
-    st.header("Add Stock")
-    ticker = st.text_input("Ticker Symbol").upper()
-    buy_price = st.number_input("Buy Price", min_value=0.0, step=0.1)
-    quantity = st.number_input("Quantity", min_value=1, step=1)
-    add = st.button("Add to Portfolio")
-
+# Initialize session state
 if "portfolio" not in st.session_state:
-    st.session_state.portfolio = []
+    st.session_state.portfolio = {}
+if "realized_profit" not in st.session_state:
+    st.session_state.realized_profit = 0.0
 
-if add and ticker:
-    st.session_state.portfolio.append({"ticker": ticker, "buy_price": buy_price, "quantity": quantity})
+# Load API key
+if "ALPHA_VANTAGE_API_KEY" in st.secrets:
+    ALPHA_VANTAGE_API_KEY = st.secrets["ALPHA_VANTAGE_API_KEY"]
+else:
+    ALPHA_VANTAGE_API_KEY = st.text_input("Enter Alpha Vantage API Key")
 
-if st.session_state.portfolio:
-    rows = []
-    for asset in st.session_state.portfolio:
-        ticker = asset["ticker"]
-        buy_price = asset["buy_price"]
-        quantity = asset["quantity"]
+st.title("📊 Portfolio Dashboard")
+st.caption("Analyze your portfolio by sector, market cap, P/E, and sentiment.")
 
-        data = get_yahoo_data(ticker)
-        price = data["price"]
-        sector = data["sector"]
-        mcap = data["marketCap"]
-        pe = data["peRatio"]
-        cap_class = classify_market_cap(mcap)
+# Sidebar inputs
+st.sidebar.header("Add Transaction")
+ticker = st.sidebar.text_input("Ticker Symbol").upper()
+buy_price = st.sidebar.number_input("Price", min_value=0.0)
+quantity = st.sidebar.number_input("Quantity", min_value=1, step=1)
+transaction_type = st.sidebar.selectbox("Transaction Type", ["Buy", "Sell"])
 
-        sentiment = get_sentiment_alpha(ticker, ALPHA_VANTAGE_API_KEY)
-        time.sleep(15)
+if st.sidebar.button("Add to Portfolio"):
+    if ticker:
+        stock = yf.Ticker(ticker)
+        info = stock.info
+        name = info.get("longName", ticker)
 
-        if price:
-            value = price * quantity
-            pnl = (price - buy_price) * quantity
-            return_pct = (pnl / (buy_price * quantity)) * 100
-        else:
-            value = pnl = return_pct = None
+        if ticker not in st.session_state.portfolio:
+            st.session_state.portfolio[ticker] = {
+                "name": name,
+                "quantity": 0,
+                "average_cost": 0,
+                "transactions": []
+            }
 
-        action = recommend_action(sentiment, return_pct)
+        record = st.session_state.portfolio[ticker]
 
-        rows.append({
-            "Ticker": ticker,
-            "Sector": sector,
-            "Market Cap Class": cap_class,
-            "P/E Ratio": pe,
-            "Quantity": quantity,
-            "Buy Price": buy_price,
-            "Current Price": price,
-            "Value ($)": round(value, 2) if value else "N/A",
-            "Return (%)": round(return_pct, 2) if return_pct else "N/A",
-            "Sentiment": round(sentiment, 3) if sentiment else "N/A",
-            "Action": action
+        if transaction_type == "Buy":
+            total_cost = record["average_cost"] * record["quantity"] + buy_price * quantity
+            record["quantity"] += quantity
+            record["average_cost"] = total_cost / record["quantity"]
+
+        elif transaction_type == "Sell":
+            sell_quantity = min(quantity, record["quantity"])
+            if sell_quantity > 0:
+                profit = (buy_price - record["average_cost"]) * sell_quantity
+                st.session_state.realized_profit += profit
+                record["quantity"] -= sell_quantity
+                if record["quantity"] == 0:
+                    record["average_cost"] = 0
+
+        record["transactions"].append({
+            "type": transaction_type.lower(),
+            "price": buy_price,
+            "quantity": quantity,
+            "date": datetime.today().strftime("%Y-%m-%d")
         })
 
-    df = pd.DataFrame(rows)
-    st.subheader("📋 Portfolio Overview")
+# Display portfolio
+if not st.session_state.portfolio:
+    st.info("Add stocks from the sidebar to begin.")
+else:
+    data = []
+    for ticker, record in st.session_state.portfolio.items():
+        if record["quantity"] == 0:
+            continue
+        stock = yf.Ticker(ticker)
+        info = stock.info
+        price = info.get("regularMarketPrice", 0)
+        sector = info.get("sector", "N/A")
+        market_cap = info.get("marketCap", 0)
+        pe_ratio = info.get("trailingPE", None)
+
+        # Determine market cap category
+        if market_cap >= 10**10:
+            cap_category = "Large Cap"
+        elif market_cap >= 2*10**9:
+            cap_category = "Mid Cap"
+        else:
+            cap_category = "Small Cap"
+
+        # Alpha Vantage Sentiment
+        sentiment_score = None
+        if ALPHA_VANTAGE_API_KEY:
+            url = f"https://www.alphavantage.co/query?function=NEWS_SENTIMENT&tickers={ticker}&apikey={ALPHA_VANTAGE_API_KEY}"
+            try:
+                response = requests.get(url)
+                articles = response.json().get("feed", [])
+                if articles:
+                    sentiment_score = float(articles[0].get("overall_sentiment_score", 0))
+            except:
+                sentiment_score = None
+
+        current_value = record["quantity"] * price
+        unrealized_pnl = (price - record["average_cost"]) * record["quantity"]
+
+        data.append({
+            "Ticker": ticker,
+            "Company": record["name"],
+            "Quantity": record["quantity"],
+            "Avg Cost": round(record["average_cost"], 2),
+            "Current Price": round(price, 2),
+            "Value": round(current_value, 2),
+            "Unrealized PnL": round(unrealized_pnl, 2),
+            "Sector": sector,
+            "Market Cap": cap_category,
+            "P/E": pe_ratio,
+            "Sentiment": sentiment_score
+        })
+
+    df = pd.DataFrame(data)
     st.dataframe(df)
 
-    # === Charts ===
-    st.subheader("📊 Sector Allocation")
-    sector_chart = df.groupby("Sector")["Value ($)"].sum().reset_index()
-    fig1 = px.pie(sector_chart, names="Sector", values="Value ($)", title="Sector Allocation")
-    st.plotly_chart(fig1)
+    # Portfolio summary
+    total_value = df["Value"].sum()
+    st.metric("Total Portfolio Market Value", f"${total_value:,.2f}")
+    st.metric("Realized Profit", f"${st.session_state.realized_profit:,.2f}")
+    st.metric("Combined Portfolio Value", f"${total_value + st.session_state.realized_profit:,.2f}")
 
-    st.subheader("🏛️ Market Cap Distribution")
-    cap_chart = df.groupby("Market Cap Class")["Value ($)"].sum().reset_index()
-    fig2 = px.bar(cap_chart, x="Market Cap Class", y="Value ($)", title="Market Cap Allocation")
-    st.plotly_chart(fig2)
+    # Charts
+    if "Sector" in df:
+        fig_sector = px.pie(df, names="Sector", values="Value", title="Sector Allocation")
+        st.plotly_chart(fig_sector)
 
-    st.subheader("📈 P/E vs Return")
-    pe_data = df[(df["P/E Ratio"].notna()) & (df["Return (%)"] != "N/A")]
-    if not pe_data.empty:
-        fig3 = px.scatter(pe_data, x="P/E Ratio", y="Return (%)", text="Ticker", title="P/E vs Return")
-        st.plotly_chart(fig3)
+    if "Market Cap" in df:
+        fig_cap = px.histogram(df, x="Market Cap", y="Value", title="Market Cap Distribution", histfunc="sum")
+        st.plotly_chart(fig_cap)
 
-    st.subheader("🔁 Rebalancing Suggestions")
-    for row in rows:
-        st.markdown(f"**{row['Ticker']}** → {row['Action']}")
-else:
-    st.info("Add stocks from the sidebar to begin.")
+    if "P/E" in df:
+        fig_pe = px.scatter(df, x="P/E", y="Unrealized PnL", text="Ticker", title="P/E vs. Unrealized PnL")
+        st.plotly_chart(fig_pe)
+
